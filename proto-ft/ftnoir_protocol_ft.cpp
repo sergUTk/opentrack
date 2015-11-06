@@ -67,6 +67,8 @@ void FTNoIR_Protocol::pose(const double* headpose) {
     
     if (intGameID != id)
     {
+        shm.lock();
+        
         QString gamename;
         {
             unsigned char table[8];
@@ -77,6 +79,8 @@ void FTNoIR_Protocol::pose(const double* headpose) {
         intGameID = id;
         QMutexLocker foo(&this->game_name_mutex);
         connected_game = gamename;
+        
+        shm.unlock();
     }
     
     data->DataID += 1;

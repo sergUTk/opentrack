@@ -3,12 +3,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <accctrl.h>
+#include <aclapi.h>
 #include <tchar.h>
 
 #define FREETRACK_MUTEX "FT_Mutext"
 #define FT_MM_DATA "FT_SharedMem"
 
-typedef struct TFreeTrackData {
+typedef struct
+{
     int DataID;
     int CamWidth;
     int CamHeight;
@@ -32,17 +35,19 @@ typedef struct TFreeTrackData {
     float Y3;
     float X4;
     float Y4;
-} TFreeTrackData;
+} ft_data_t;
 
-typedef struct FTMemMap {
-    TFreeTrackData data;
+typedef struct {
+    ft_data_t data;
     __int32 GameId;
     unsigned char table[8];
     __int32 GameId2;
-} FTMemMap;
+} impl_ft_map_t;
 
-static BOOL bEncryptionChecked = FALSE;
-static double r = 0, p = 0, y = 0, tx = 0, ty = 0, tz = 0;
+typedef impl_ft_map_t volatile * ft_map_t;
+
+static BOOL encryption_checked = FALSE;
+static float r = 0, p = 0, y = 0, tx = 0, ty = 0, tz = 0;
 
 #define NP_DECLSPEC __declspec(dllexport)
 #define NP_EXPORT(t) t NP_DECLSPEC __stdcall
@@ -50,8 +55,8 @@ static double r = 0, p = 0, y = 0, tx = 0, ty = 0, tz = 0;
 
 static BOOL FTCreateMapping(void);
 static void FTDestroyMapping(void);
-static __inline double scale2AnalogLimits( double x, double min_x, double max_x );
-static __inline double getDegreesFromRads ( double rads );
+static __inline float clamp_range(float x, float min_x, float max_x);
+static __inline float r2d (float rads);
 
 #if DEBUG
 static FILE *debug_stream;
@@ -60,13 +65,14 @@ static FILE *debug_stream;
 #define dbg_report(...)
 #endif
 
-static HANDLE hFTMemMap = 0;
-static FTMemMap *pMemData = 0;
+static HANDLE ft_map_handle = 0;
+static ft_map_t mapping_ptr = 0;
 static HANDLE hFTMutex = 0;
-static BOOL bEncryption = FALSE;
+static BOOL use_encryption_p = FALSE;
 static unsigned char table[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-typedef struct tir_data{
+typedef struct
+{
     short status;
     short frame;
     unsigned int cksum;
@@ -75,7 +81,8 @@ typedef struct tir_data{
     float padding[9];
 } tir_data_t;
 
-typedef struct tir_signature{
+typedef struct
+{
     char DllSignature[200];
     char AppSignature[200];
 } tir_signature_t;
@@ -247,19 +254,19 @@ static __inline void enhance(unsigned char buf[], unsigned int size,
   unsigned int table_ptr = 0;
   unsigned char var = 0x88;
   unsigned char tmp;
-  if((size <= 0) || (table_size <= 0) ||
-     (buf == NULL) || (table == NULL)){
+  if (size <= 0 || table_size <= 0 || buf == NULL && table == NULL)
     return;
-  }
-  do{
+
+  do
+  {
     tmp = buf[--size];
     buf[size] = tmp ^ table[table_ptr] ^ var;
     var += size + tmp;
     ++table_ptr;
-    if(table_ptr >= table_size){
+    if (table_ptr >= table_size)
       table_ptr -= table_size;
-    }
-  }while(size != 0);
+  }
+  while(size != 0);
 }
 
 /******************************************************************
@@ -278,47 +285,47 @@ NP_EXPORT(int) NP_GetData(tir_data_t * data)
         dbg_report("Can't open mapping\n");
         return 0;
     }
-
-    if (pMemData && hFTMutex && WaitForSingleObject(hFTMutex, 15) == WAIT_OBJECT_0) {
+    
+    if (mapping_ptr && hFTMutex)
 #if DEBUG
         recv = 1;
 #endif
-        y = getDegreesFromRads( pMemData->data.Yaw );
-        p = getDegreesFromRads( pMemData->data.Pitch );
-        r = getDegreesFromRads( pMemData->data.Roll );
-        tx = pMemData->data.X;
-        ty = pMemData->data.Y;
-        tz = pMemData->data.Z;
-
-        if (!bEncryptionChecked) {
-            dbg_report("NP_GetData: game = %d\n", pMemData->GameId);
-            memcpy(table, pMemData->table, 8);
-            for (i = 0; i < 8; i++)
-                if (table[i])
-                {
-                    bEncryption = TRUE;
-                    break;
-                }
-            dbg_report("NP_GetData: Table = %02d %02d %02d %02d %02d %02d %02d %02d\n", table[0],table[1],table[2],table[3],table[4],table[5], table[6], table[7]);
-            bEncryptionChecked = pMemData->GameId2 == pMemData->GameId;
+    y = r2d(mapping_ptr->data.Yaw);
+    p = r2d(mapping_ptr->data.Pitch);
+    r = r2d(mapping_ptr->data.Roll);
+    tx = mapping_ptr->data.X;
+    ty = mapping_ptr->data.Y;
+    tz = mapping_ptr->data.Z;
+    
+    if (!encryption_checked && WaitForSingleObject(hFTMutex, 31) == WAIT_OBJECT_0)
+    {
+        dbg_report("NP_GetData: game = %d\n", mapping_ptr->GameId);
+        for (i = 0; i < 8; i++)
+        {
+            table[i] = mapping_ptr->table[i];
+            if (table[i])
+                use_encryption_p = TRUE;
         }
-
-        ReleaseMutex(hFTMutex);
+        dbg_report("NP_GetData: Table = %02d %02d %02d %02d %02d %02d %02d %02d\n", table[0],table[1],table[2],table[3],table[4],table[5], table[6], table[7]);
+        encryption_checked = mapping_ptr->GameId2 == mapping_ptr->GameId;
     }
-
+    
+    ReleaseMutex(hFTMutex);
+    
     data->frame = frameno += 1;
     data->status = 0;
     data->cksum = 0;
 
-    data->roll  = scale2AnalogLimits (r, -180.0, 180.0);
-    data->pitch = scale2AnalogLimits (p, -180.0, 180.0);
-    data->yaw   = scale2AnalogLimits (y, -180.0, 180.0);
+    data->roll  = clamp_range (r, -180.0, 180.0);
+    data->pitch = clamp_range (p, -180.0, 180.0);
+    data->yaw   = clamp_range (y, -180.0, 180.0);
 
-    data->tx = scale2AnalogLimits (tx, -500.0, 500.0);
-    data->ty = scale2AnalogLimits (ty, -500.0, 500.0);
-    data->tz = scale2AnalogLimits (tz, -500.0, 500.0);
+    data->tx = clamp_range (tx, -500.0, 500.0);
+    data->ty = clamp_range (ty, -500.0, 500.0);
+    data->tz = clamp_range (tz, -500.0, 500.0);
 
-    for(i = 0; i < 9; ++i) {
+    for (i = 0; i < 9; ++i)
+    {
         data->padding[i] = 0.0;
     }
 
@@ -328,7 +335,8 @@ NP_EXPORT(int) NP_GetData(tir_data_t * data)
 
     data->cksum = cksum((unsigned char*)data, sizeof(tir_data_t));
 
-    if(bEncryption) {
+    if (use_encryption_p)
+    {
         enhance((unsigned char*)data, sizeof(tir_data_t), table, sizeof(table));
     }
 
@@ -434,8 +442,6 @@ NP_EXPORT(int) NP_GetSignature(tir_signature_t * sig)
         sig->DllSignature[i] = part1_2[i] ^ part1_1[i];
     for (i = 0; i < 200; i++)
         sig->AppSignature[i] = part2_1[i] ^ part2_2[i];
-    memset(sig->DllSignature + strlen(sig->DllSignature), 0, 200 - strlen(sig->DllSignature));
-    memset(sig->AppSignature + strlen(sig->AppSignature), 0, 200 - strlen(sig->AppSignature));
     return 0;
 }
 
@@ -462,7 +468,7 @@ NP_EXPORT(int) NP_ReCenter(void)
 NP_EXPORT(int) NP_RegisterProgramProfileID(unsigned short id)
 {
     if (FTCreateMapping())
-        pMemData->GameId = id;
+        mapping_ptr->GameId = id;
     dbg_report("RegisterProgramProfileID request: %d\n", id);
     return 0;
 }
@@ -539,40 +545,146 @@ NP_EXPORT(int) NP_UnregisterWindowHandle(void)
     return (int) 0;
 }
 
+typedef struct
+{
+    BOOL success;
+    SECURITY_DESCRIPTOR* pSD;
+    SECURITY_ATTRIBUTES attrs;
+    PSID pEveryoneSID;
+    PACL pACL;
+} secattr;
+
+void secattr_cleanup(secattr* s)
+{
+    if (s->pEveryoneSID)
+        FreeSid(s->pEveryoneSID);
+    if (s->pACL)
+        LocalFree(s->pACL);
+    if (s->pSD)
+        LocalFree(s->pSD);
+    s->success = FALSE;
+    s->pSD = NULL;
+    s->pEveryoneSID = NULL;
+    s->pACL = NULL;
+    free(s);
+}
+
+secattr* make_secattr(DWORD perms)
+{
+    secattr* ret = calloc(1, sizeof(secattr));
+
+    if (ret == NULL)
+        return NULL;
+
+    ret->success = TRUE;
+    ret->pSD = NULL;
+    ret->pEveryoneSID = NULL;
+    ret->pACL = NULL;
+
+    SID_IDENTIFIER_AUTHORITY SIDAuthWorld = SECURITY_WORLD_SID_AUTHORITY;
+    EXPLICIT_ACCESS ea;
+
+    if(!AllocateAndInitializeSid(&SIDAuthWorld, 1,
+                     SECURITY_WORLD_RID,
+                     0, 0, 0, 0, 0, 0, 0,
+                     &ret->pEveryoneSID))
+    {
+        fprintf(stderr, "AllocateAndInitializeSid: %d\n", (int) GetLastError());
+        goto cleanup;
+    }
+
+    memset(&ea, 0, sizeof(ea));
+
+    ea.grfAccessPermissions = perms;
+    ea.grfAccessMode = SET_ACCESS;
+    ea.grfInheritance = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName  = (LPTSTR) ret->pEveryoneSID;
+
+    if (SetEntriesInAcl(1, &ea, NULL, &ret->pACL) != ERROR_SUCCESS)
+    {
+        fprintf(stderr, "SetEntriesInAcl: %d\n", (int) GetLastError());
+        goto cleanup;
+    }
+
+    ret->pSD = (SECURITY_DESCRIPTOR*) LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
+    if (ret->pSD == NULL)
+    {
+        fprintf(stderr, "LocalAlloc: %d\n", (int) GetLastError());
+        goto cleanup;
+    }
+
+    if (!InitializeSecurityDescriptor(ret->pSD, SECURITY_DESCRIPTOR_REVISION))
+    {
+        fprintf(stderr, "InitializeSecurityDescriptor: %d\n", (int) GetLastError());
+        goto cleanup;
+    }
+
+    if (!SetSecurityDescriptorDacl(ret->pSD, TRUE, ret->pACL, FALSE))
+    {
+        fprintf(stderr, "SetSecurityDescriptorDacl: %d\n", (int) GetLastError());
+        goto cleanup;
+    }
+
+    ret->attrs.bInheritHandle = FALSE;
+    ret->attrs.lpSecurityDescriptor = ret->pSD;
+    ret->attrs.nLength = sizeof(SECURITY_ATTRIBUTES);
+
+    fprintf(stderr, "security descriptor ok\n");
+    fflush(stderr);
+
+    return ret;
+
+cleanup:
+    fflush(stderr);
+    secattr_cleanup(ret);
+    return NULL;
+}
+
 static BOOL FTCreateMapping(void)
 {
-    BOOL bMappingExists = FALSE;
+    BOOL mapping_exists_p = FALSE;
 
-    if (pMemData)
+    if (mapping_ptr)
         return TRUE;
 
-    dbg_report("FTCreateMapping request (pMemData == NULL).\n");
+    secattr* sa = make_secattr(GENERIC_ALL|SYNCHRONIZE);
+    BOOL use_sa = sa && sa->success;
 
-    hFTMutex = CreateMutexA(NULL, FALSE, FREETRACK_MUTEX);
-    hFTMemMap = CreateFileMappingA( INVALID_HANDLE_VALUE, 00, PAGE_READWRITE, 0, sizeof( FTMemMap ), (LPCSTR) FT_MM_DATA );
-    pMemData = (FTMemMap *) MapViewOfFile(hFTMemMap, FILE_MAP_WRITE, 0, 0, sizeof( FTMemMap ) );
-    return pMemData != NULL && hFTMutex != NULL;
+    dbg_report("FTCreateMapping request (mapping_ptr == NULL).\n");
+
+    hFTMutex = CreateMutexA(use_sa ? &sa->attrs : NULL, FALSE, FREETRACK_MUTEX);
+    ft_map_handle = CreateFileMappingA(INVALID_HANDLE_VALUE,
+                                       use_sa ? &sa->attrs : NULL,
+                                       PAGE_READWRITE,
+                                       0,
+                                       sizeof(impl_ft_map_t),
+                                       (LPCSTR) FT_MM_DATA);
+    mapping_ptr = (ft_map_t) MapViewOfFile(ft_map_handle, FILE_MAP_WRITE, 0, 0, sizeof(impl_ft_map_t));
+    if (sa)
+        secattr_cleanup(sa);
+    return mapping_ptr != NULL && hFTMutex != NULL;
 }
 
 static void FTDestroyMapping(void)
 {
-    if ( pMemData != NULL ) {
-        UnmapViewOfFile ( pMemData );
-    }
+    if (mapping_ptr != NULL)
+        UnmapViewOfFile((void*) mapping_ptr);
 
-    CloseHandle( hFTMutex );
-    CloseHandle( hFTMemMap );
-    pMemData = 0;
-    hFTMemMap = 0;
+    (void) CloseHandle(hFTMutex);
+    (void) CloseHandle(ft_map_handle);
+    mapping_ptr = NULL;
+    ft_map_handle = 0;
 }
 
-static __inline double getDegreesFromRads ( double rads ) { 
-    return (rads * 57.295781);
+static __inline float r2d (float rads) { 
+    return rads * 57.295781;
 }
 
-static __inline double scale2AnalogLimits( double x, double min_x, double max_x ) {
-    double y;
-    double local_x;
+static __inline float clamp_range(float x, float min_x, float max_x) {
+    float y;
+    float local_x;
 
     local_x = x;
     if (local_x > max_x) {
@@ -581,7 +693,7 @@ static __inline double scale2AnalogLimits( double x, double min_x, double max_x 
     if (local_x < min_x) {
         local_x = min_x;
     }
-    y = ( NP_AXIS_MAX * local_x ) / max_x;
+    y = (NP_AXIS_MAX * local_x) / max_x;
 
     return y;
 }

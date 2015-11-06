@@ -18,21 +18,12 @@
  * * created by the FreeTrack developers.                                           *
  */
 
-#ifndef _MSC_VER
-#   warning "expect misnamed symbols"
-#endif
-
-#pragma GCC diagnostic ignored "-Wvariadic-macros"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-
-#define NP_AXIS_MAX 16383
-
 #include <string.h>
 #include <windows.h>
 
 #include "fttypes.h"
 
-#define FT_EXPORT(t) t __stdcall
+#define FT_EXPORT(t) __declspec(dllexport) t __stdcall
 
 #if 0
 #   include <stdio.h>
@@ -43,7 +34,7 @@ static FILE *debug_stream = fopen("c:\\FreeTrackClient.log", "a");
 #endif
 
 static HANDLE hFTMemMap = 0;
-static FTHeap* ipc_heap = 0;
+static FTHeap volatile* ipc_heap = 0;
 static HANDLE ipc_mutex = 0;
 static const char* dllVersion = "1.0.0.0";
 static const char* dllProvider = "FreeTrack";
@@ -75,7 +66,8 @@ FT_EXPORT(BOOL) FTGetData(FTData* data)
         return FALSE;
 
     if (ipc_mutex && WaitForSingleObject(ipc_mutex, 16) == WAIT_OBJECT_0) {
-        memcpy(data, &ipc_heap->data, sizeof(FTData));
+        for (int i = 0; i < 8; i++)
+            data[i] = ipc_heap->data;
         if (ipc_heap->data.DataID > (1 << 29))
             ipc_heap->data.DataID = 0;
         ReleaseMutex(ipc_mutex);
@@ -110,8 +102,10 @@ FT_EXPORT(const char*) FTProvider(void)
     return dllProvider;
 }
 
-#pragma comment (linker, "/export:FTReportID=_FTReportID@4")
-#pragma comment (linker, "/export:FTReportName=_FTReportName@4")
-#pragma comment (linker, "/export:FTGetDllVersion=_FTGetDllVersion@0")
-#pragma comment (linker, "/export:FTProvider=_FTProvider@0")
-#pragma comment (linker, "/export:FTGetData=_FTGetData@4")
+#ifdef _MSC_VER
+#    pragma comment (linker, "/export:FTReportID=_FTReportID@4")
+#    pragma comment (linker, "/export:FTReportName=_FTReportName@4")
+#    pragma comment (linker, "/export:FTGetDllVersion=_FTGetDllVersion@0")
+#    pragma comment (linker, "/export:FTProvider=_FTProvider@0")
+#    pragma comment (linker, "/export:FTGetData=_FTGetData@4")
+#endif
