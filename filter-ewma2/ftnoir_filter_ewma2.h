@@ -33,7 +33,8 @@ private:
     double last_delta[6];
     double last_noise[6];
     double last_output[6];
-    Timer timer;
+    double dt_;
+    Timer sample_timer, filter_timer;
     settings s;
     bool first_run;
 };
